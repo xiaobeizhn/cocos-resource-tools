@@ -1,0 +1,47 @@
+{
+    "package_version": 2,
+    "name": "resource-cleaner",
+    "version": "1.0.0",
+    "description": "清理未被指定文件夹内 Prefab 依赖的资源（同步删除 .meta）",
+    "editor": ">=3.8.0",
+    "main": "main.js",
+    "panels": {
+        "default": {
+            "title": "Prefab 依赖清理",
+            "type": "dockable",
+            "main": "panel.js",
+            "size": {
+                "min-width": 420,
+                "min-height": 360,
+                "width": 620,
+                "height": 580
+            }
+        }
+    },
+    "contributions": {
+        "menu": [
+            {
+                "path": "i18n:menu.extension/Prefab 依赖清理",
+                "label": "打开清理面板",
+                "message": "open-panel"
+            }
+        ],
+        "messages": {
+            "open-panel": {
+                "methods": [
+                    "openPanel"
+                ]
+            },
+            "query-unused-assets": {
+                "methods": [
+                    "queryUnusedAssets"
+                ]
+            },
+            "delete-selected": {
+                "methods": [
+                    "deleteSelected"
+                ]
+            }
+        }
+    }
+}
