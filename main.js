@@ -75,9 +75,9 @@ exports.methods = {
             };
         }
 
-        // 2. BFS 递归收集所有 Prefab 的直接 + 间接依赖（Prefab → 材质 → 贴图 …）
-        //    query-asset-dependencies 返回的是“直接依赖”的 uuid 数组，
-        //    这里用队列把整张依赖闭包走完。
+        // 2. BFS 递归收集所有 Prefab 的直接 + 间接资源依赖（Prefab → 材质 → 贴图 …）
+        //    query-asset-dependencies 第二个参数 'asset' 仅返回”资源依赖”，
+        //    已自动排除脚本（Script）依赖，因此脚本不会进入引用集合。
         const referenced = new Set();
         const queue = prefabAssets.map((p) => p.uuid);
 
@@ -103,9 +103,26 @@ exports.methods = {
         const referencedBase = new Set();
         for (const u of referenced) { referencedBase.add(baseUuid(u)); }
 
-        // 4. 获取文件夹 B 中的所有资源（过滤掉文件夹与 .meta）
+        // 脚本属于逻辑代码，不在资源清理范围内：按扩展名或类型名识别并排除。
+        const SCRIPT_EXT = /\.(ts|js|mjs|cjs|tsx|jsx)$/i;
+        function isScriptAsset(a) {
+            const name = String(a.name || '');
+            const url = String(a.url || '');
+            if (SCRIPT_EXT.test(name) || SCRIPT_EXT.test(url)) { return true; }
+            const type = String(a.type || '');
+            if (/script/i.test(type)) { return true; }
+            return false;
+        }
+
+        // 4. 获取文件夹 B 中的所有资源（过滤文件夹、.meta、脚本）
         const depAssets = await queryAssetsWhenReady(depDbPath + '/**/*');
-        const depFiles = depAssets.filter((a) => a && !a.isDirectory && !String(a.name).endsWith('.meta'));
+        const depFiles = depAssets.filter((a) =>
+            a && !a.isDirectory && !String(a.name).endsWith('.meta') && !isScriptAsset(a)
+        );
+        // 统计被过滤掉的脚本数量（仅用于结果展示，确认过滤生效）
+        const scriptsFiltered = depAssets.filter(
+            (a) => a && !a.isDirectory && !String(a.name).endsWith('.meta') && isScriptAsset(a)
+        ).length;
 
         // 5. 未被任何 Prefab 依赖的资源
         const unused = depFiles
@@ -123,6 +140,7 @@ exports.methods = {
             prefabCount: prefabAssets.length,
             referencedCount: referencedBase.size,
             total: depFiles.length,
+            scriptsFiltered,
             unused
         };
     },

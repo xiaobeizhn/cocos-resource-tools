@@ -502,10 +502,14 @@ module.exports = Editor.Panel.define({
                 if (data.message) {
                     $.summaryText.innerHTML = '<span class="warn">' + data.message + '</span>';
                 } else {
+                    const scriptInfo = data.scriptsFiltered
+                        ? '　·　已忽略脚本：<b>' + data.scriptsFiltered + '</b>'
+                        : '';
                     $.summaryText.innerHTML =
                         'Prefab 数量：<b>' + data.prefabCount + '</b>　·　' +
                         '依赖资源总数：<b>' + data.total + '</b>　·　' +
-                        '未使用：<b style="color:#ff6b6b">' + unusedAssets.length + '</b>';
+                        '未使用：<b style="color:#ff6b6b">' + unusedAssets.length + '</b>' +
+                        scriptInfo;
                 }
 
                 renderFileList();
