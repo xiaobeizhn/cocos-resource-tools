@@ -5,14 +5,14 @@ module.exports = Editor.Panel.define({
         <div class="container">
             <div class="header">
                 <h2>Prefab 依赖清理工具</h2>
-                <p class="tip">删除依赖资源文件夹中，没有被 Prefab 文件夹内任意 Prefab（直接或间接）引用的资源。</p>
+                <p class="tip">删除依赖资源文件夹中，没有被指定 Prefab（文件夹或单个 .prefab 文件，直接或间接）引用的资源。</p>
             </div>
 
             <div class="folder-select">
                 <div class="row">
-                    <label>Prefab 文件夹</label>
+                    <label>Prefab 路径</label>
                     <div class="input-wrap">
-                        <ui-input id="prefabPath" placeholder="例如 db://assets/prefabs"></ui-input>
+                        <ui-input id="prefabPath" placeholder="文件夹如 db://assets/prefabs 或文件如 db://assets/prefabs/ui.prefab"></ui-input>
                         <div class="autocomplete" id="prefabAC"></div>
                     </div>
                 </div>
@@ -158,11 +158,29 @@ module.exports = Editor.Panel.define({
             padding: 7px 8px;
             border-bottom: 1px solid #3a3a3a;
             font-size: 12px;
+            cursor: pointer;
         }
         .file-item:hover { background: #333; }
         .file-item ui-checkbox {
             margin-right: 10px;
             flex-shrink: 0;
+        }
+        .preview-btn {
+            flex-shrink: 0;
+            margin-left: 8px;
+            padding: 3px 9px;
+            font-size: 11px;
+            color: #ccc;
+            background: #3a3a3a;
+            border: 1px solid #555;
+            border-radius: 3px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .preview-btn:hover {
+            background: #3a6ea5;
+            color: #fff;
+            border-color: #3a6ea5;
         }
         .file-info { flex: 1; min-width: 0; }
         .file-name {
@@ -264,38 +282,70 @@ module.exports = Editor.Panel.define({
         const selectedUuids = new Set();
 
         // ---------------- 路径自动补全 ----------------
-        /** 缓存项目内的所有文件夹路径 */
-        let folderOptions = null;
-        let folderLoading = false;
-
-        async function loadFolderOptions() {
-            if (folderOptions || folderLoading) { return folderOptions || []; }
-            folderLoading = true;
-            let dirs = [];
+        /** 查询项目内全部资源的 { url, isDirectory }（带缓存，供各下拉框共享）。 */
+        let allAssetUrlsCache = null;
+        async function loadAllAssetUrls() {
+            if (allAssetUrlsCache) { return allAssetUrlsCache; }
+            let all = [];
             try {
-                const all = await Editor.Message.request('asset-db', 'query-assets', {
+                all = await Editor.Message.request('asset-db', 'query-assets', {
                     pattern: 'db://assets/**/*'
                 });
-                dirs = (all || []).filter((a) => a && a.isDirectory).map((a) => a.url);
             } catch (e) {
-                dirs = [];
+                all = [];
             }
-            const set = new Set(dirs);
+            allAssetUrlsCache = (all || [])
+                .filter((a) => a && a.url)
+                .map((a) => ({ url: a.url, isDirectory: !!a.isDirectory }));
+            return allAssetUrlsCache;
+        }
+
+        /** 依赖资源文件夹输入：只提示文件夹路径。 */
+        async function loadFolderOptions() {
+            const all = await loadAllAssetUrls();
+            const set = new Set(all.filter((a) => a.isDirectory).map((a) => a.url));
             set.add('db://assets');
-            folderOptions = Array.from(set).sort();
-            folderLoading = false;
-            return folderOptions;
+            return Array.from(set).sort();
+        }
+
+        /**
+         * Prefab 输入：既支持文件夹，也支持单个 .prefab 文件，
+         * 因此候选项同时包含文件夹与所有 .prefab 文件路径。
+         */
+        async function loadPrefabOptions() {
+            const all = await loadAllAssetUrls();
+            const set = new Set();
+            for (const a of all) {
+                if (a.isDirectory) {
+                    set.add(a.url);
+                } else if (/\.prefab$/i.test(a.url)) {
+                    set.add(a.url);
+                }
+            }
+            set.add('db://assets');
+            return Array.from(set).sort();
         }
 
         /**
          * 给一个 ui-input 挂上自动补全下拉框。
          * @param {HTMLElement} input  ui-input 宿主元素
          * @param {HTMLElement} drop   下拉框容器
+         * @param {() => Promise<string[]>} loadOptions  返回候选项数组的函数（自带缓存）
          */
-        function attachAutocomplete(input, drop) {
+        function attachAutocomplete(input, drop, loadOptions) {
             let filtered = [];
             let active = -1;
             let suppressBlur = false;
+            /** @type {string[] | null} null 表示尚未加载 */
+            let options = null;
+
+            function ensureLoaded() {
+                if (options) { return Promise.resolve(options); }
+                return loadOptions().then((opts) => {
+                    options = (opts || []).slice();
+                    return options;
+                });
+            }
 
             // 写入 ui-input 值：同时更新宿主属性与 shadow DOM 内部原生输入框。
             // 关键点——直接改内部 input 的 value，这样即便 ui-input 在失焦时
@@ -317,7 +367,7 @@ module.exports = Editor.Panel.define({
 
             function doFilter(val) {
                 const v = String(val || '').toLowerCase();
-                const opts = folderOptions || [];
+                const opts = options || [];
                 if (!v) {
                     filtered = opts.slice(0, 30);
                 } else {
@@ -338,7 +388,7 @@ module.exports = Editor.Panel.define({
                 if (!filtered.length) {
                     const empty = document.createElement('div');
                     empty.className = 'ac-empty';
-                    empty.textContent = folderOptions === null ? '加载中…' : '无匹配目录';
+                    empty.textContent = options === null ? '加载中…' : '无匹配项';
                     drop.appendChild(empty);
                     drop.style.display = 'block';
                     return;
@@ -368,14 +418,17 @@ module.exports = Editor.Panel.define({
             function hide() { drop.style.display = 'none'; active = -1; }
 
             input.addEventListener('focus', () => {
-                loadFolderOptions().then(() => show(input.value || ''));
+                ensureLoaded().then(() => show(input.value || ''));
             });
-            input.addEventListener('input', (e) => { show(liveValue(e)); });
+            input.addEventListener('input', (e) => {
+                if (options === null) { ensureLoaded().then(() => show(liveValue(e))); }
+                else { show(liveValue(e)); }
+            });
 
             input.addEventListener('keydown', (e) => {
                 const open = drop.style.display === 'block';
                 if (e.key === 'ArrowDown') {
-                    if (!open) { loadFolderOptions().then(() => show(liveValue(e))); return; }
+                    if (!open) { ensureLoaded().then(() => show(liveValue(e))); return; }
                     if (filtered.length) {
                         e.preventDefault();
                         active = (active + 1) % filtered.length;
@@ -404,8 +457,8 @@ module.exports = Editor.Panel.define({
             });
         }
 
-        attachAutocomplete($.prefabPath, $.prefabAC);
-        attachAutocomplete($.depPath, $.depAC);
+        attachAutocomplete($.prefabPath, $.prefabAC, loadPrefabOptions);
+        attachAutocomplete($.depPath, $.depAC, loadFolderOptions);
 
         // 点击下拉框以外区域时关闭
         document.addEventListener('click', (e) => {
@@ -422,6 +475,19 @@ module.exports = Editor.Panel.define({
             el.checked = !!checked;
         }
 
+        /**
+         * 在 Cocos 中选中并显示指定资源（属性检查器 / 资源预览区）。
+         * 只设置选中状态，不主动切换面板焦点，避免本面板被遮挡/隐藏。
+         */
+        function selectAssetForPreview(uuid) {
+            if (!uuid) { return; }
+            try {
+                Editor.Selection.select('asset', [uuid]);
+            } catch (e) {
+                try { Editor.Selection.select('asset', uuid); } catch (e2) { /* ignore */ }
+            }
+        }
+
         function renderFileList() {
             $.fileList.innerHTML = '';
             if (!unusedAssets.length) {
@@ -431,9 +497,14 @@ module.exports = Editor.Panel.define({
                 $.fileList.appendChild(empty);
                 return;
             }
+
+            // 单击 / 双击区分计时器
+            let clickTimer = null;
+
             unusedAssets.forEach((asset) => {
                 const item = document.createElement('div');
                 item.className = 'file-item';
+                item.dataset.uuid = asset.uuid;
 
                 const checkbox = document.createElement('ui-checkbox');
                 checkbox.checked = selectedUuids.has(asset.uuid);
@@ -462,6 +533,50 @@ module.exports = Editor.Panel.define({
 
                 item.appendChild(checkbox);
                 item.appendChild(info);
+
+                // 预览按钮：单击在资源预览界面中选中并显示该资源
+                const previewBtn = document.createElement('button');
+                previewBtn.className = 'preview-btn';
+                previewBtn.type = 'button';
+                previewBtn.title = '在资源预览界面中显示';
+                previewBtn.textContent = '👁 预览';
+                previewBtn.addEventListener('click', (e) => {
+                    e.stopPropagation(); // 阻止冒泡到行的单击/双击逻辑，避免误触选中
+                    selectAssetForPreview(asset.uuid);
+                });
+                item.appendChild(previewBtn);
+
+                // 单击行：切换选中（延迟 150ms 以区分双击）
+                // 双击行：在资源管理器中定位该资源
+                item.addEventListener('click', (e) => {
+                    // 点击 checkbox / 预览按钮本身不触发行的选中切换
+                    const path = e.composedPath ? e.composedPath() : [e.target];
+                    if (path.some((el) => el.tagName === 'UI-CHECKBOX' || el.tagName === 'BUTTON')) { return; }
+
+                    if (clickTimer) {
+                        // 第二次点击 → 双击
+                        clearTimeout(clickTimer);
+                        clickTimer = null;
+                        // 双击：在资源管理器中选中并定位该资源
+                        selectAssetForPreview(asset.uuid);
+                    } else {
+                        // 第一次点击 → 等待判断是否双击
+                        clickTimer = setTimeout(() => {
+                            clickTimer = null;
+                            // 单击：切换选中状态
+                            const uuid = asset.uuid;
+                            if (selectedUuids.has(uuid)) {
+                                selectedUuids.delete(uuid);
+                                checkbox.checked = false;
+                            } else {
+                                selectedUuids.add(uuid);
+                                checkbox.checked = true;
+                            }
+                            updateUI();
+                        }, 150);
+                    }
+                });
+
                 $.fileList.appendChild(item);
             });
         }
@@ -483,7 +598,7 @@ module.exports = Editor.Panel.define({
             const prefabPath = String($.prefabPath.value || '').trim();
             const depPath = String($.depPath.value || '').trim();
             if (!prefabPath || !depPath) {
-                alert('请填写 Prefab 文件夹与依赖资源文件夹');
+                alert('请填写 Prefab 路径与依赖资源文件夹');
                 return;
             }
 

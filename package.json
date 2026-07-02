@@ -1,8 +1,8 @@
 {
     "package_version": 2,
     "name": "resource-cleaner",
-    "version": "1.0.0",
-    "description": "清理未被指定文件夹内 Prefab 依赖的资源（同步删除 .meta）",
+    "version": "1.2.3",
+    "description": "清理未被指定 Prefab（文件夹或单个 .prefab 文件）依赖的资源（同步删除 .meta）",
     "editor": ">=3.8.0",
     "main": "main.js",
     "panels": {

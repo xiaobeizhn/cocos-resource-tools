@@ -49,30 +49,50 @@ exports.methods = {
     },
 
     /**
-     * 扫描：找出依赖资源文件夹（depDbPath）中、没有被 Prefab 文件夹
-     * （prefabDbPath）里任意 Prefab 直接或间接依赖的资源。
+     * 扫描：找出依赖资源文件夹（depDbPath）中、没有被指定 Prefab
+     * （prefabInput，可为「文件夹」或「单个 .prefab 文件」）直接或间接依赖的资源。
      *
-     * @param {string} prefabDbPath 例如 db://assets/prefabs
+     * @param {string} prefabInput 例如 db://assets/prefabs 或 db://assets/prefabs/ui.prefab
      * @param {string} depDbPath   例如 db://assets/textures
      * @returns {Promise<object>} 扫描结果
      */
-    async queryUnusedAssets(prefabDbPath, depDbPath) {
-        prefabDbPath = String(prefabDbPath || '').trim().replace(/\/+$/, '');
+    async queryUnusedAssets(prefabInput, depDbPath) {
+        prefabInput = String(prefabInput || '').trim().replace(/\/+$/, '');
         depDbPath = String(depDbPath || '').trim().replace(/\/+$/, '');
 
-        if (!prefabDbPath || !depDbPath) {
-            throw new Error('请填写 Prefab 文件夹与依赖资源文件夹');
+        if (!prefabInput || !depDbPath) {
+            throw new Error('请填写 Prefab 文件夹/文件与依赖资源文件夹');
         }
 
-        // 1. 获取文件夹 A 中的所有 Prefab
-        const prefabAssets = await queryAssetsWhenReady(prefabDbPath + '/**/*.prefab');
-        if (!prefabAssets.length) {
-            return {
-                prefabCount: 0,
-                total: 0,
-                unused: [],
-                message: '在「' + prefabDbPath + '」下没有找到 .prefab 文件'
-            };
+        // 1. 获取作为依赖根的 Prefab：支持传入「单个 .prefab 文件」或「文件夹」。
+        //    - 以 .prefab 结尾：按精确路径查询单个 Prefab 资源；
+        //    - 否则视为文件夹，递归收集其下所有 .prefab。
+        const isSinglePrefab = /\.prefab$/i.test(prefabInput);
+        let prefabAssets = [];
+
+        if (isSinglePrefab) {
+            const exact = await queryAssetsWhenReady(prefabInput);
+            prefabAssets = exact.filter((a) =>
+                a && !a.isDirectory && String(a.url || '') === prefabInput
+            );
+            if (!prefabAssets.length) {
+                return {
+                    prefabCount: 0,
+                    total: 0,
+                    unused: [],
+                    message: '没有找到 Prefab 文件「' + prefabInput + '」，请确认路径是否正确'
+                };
+            }
+        } else {
+            prefabAssets = await queryAssetsWhenReady(prefabInput + '/**/*.prefab');
+            if (!prefabAssets.length) {
+                return {
+                    prefabCount: 0,
+                    total: 0,
+                    unused: [],
+                    message: '在「' + prefabInput + '」下没有找到 .prefab 文件'
+                };
+            }
         }
 
         // 2. BFS 递归收集所有 Prefab 的直接 + 间接资源依赖（Prefab → 材质 → 贴图 …）
