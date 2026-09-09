@@ -1,5 +1,79 @@
 'use strict';
 
+/**
+ * 写入 ui-input 的值：同时更新宿主属性与 shadow DOM 内部原生输入框。
+ * 关键点——直接改内部 input 的 value，这样即便 ui-input 在失焦时
+ * “回读内部值再提交”，读到的也是新值，不会被回退成旧文本。
+ *
+ * @param {HTMLElement} input ui-input 宿主元素
+ * @param {string} val
+ */
+function writeInputValue(input, val) {
+    if (!input) { return; }
+    input.value = val;
+    let inner = null;
+    try { inner = input.shadowRoot ? input.shadowRoot.querySelector('input,textarea') : null; } catch (e) { inner = null; }
+    if (!inner) { try { inner = input.$input; } catch (e) { inner = null; } }
+    if (!inner) { try { inner = input.querySelector('input,textarea'); } catch (e) { inner = null; } }
+    if (inner) { inner.value = val; }
+}
+
+/**
+ * 把系统绝对路径转换为 db:// 路径。
+ * 优先走 asset-db（路径 → uuid → url），失败时用 assets 根目录做相对拼接兜底。
+ *
+ * @param {string} fsPath 系统绝对路径
+ * @returns {Promise<string>} db:// 路径；不在 assets 目录下时返回空串
+ */
+async function fsPathToDbUrl(fsPath) {
+    const normalized = String(fsPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!normalized) { return ''; }
+
+    try {
+        const uuid = await Editor.Message.request('asset-db', 'query-uuid', normalized);
+        if (uuid) {
+            const url = await Editor.Message.request('asset-db', 'query-url', uuid);
+            if (url) { return String(url); }
+        }
+    } catch (e) { /* 走兜底 */ }
+
+    // 兜底：拿到 db://assets 对应的磁盘目录，直接做相对路径拼接
+    let assetsRoot = '';
+    try {
+        const rootPath = await Editor.Message.request('asset-db', 'query-path', 'db://assets');
+        assetsRoot = String(rootPath || '');
+    } catch (e) { assetsRoot = ''; }
+    if (!assetsRoot) {
+        try { assetsRoot = String(Editor.Project.path || '') + '/assets'; } catch (e) { assetsRoot = ''; }
+    }
+    assetsRoot = assetsRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!assetsRoot) { return ''; }
+
+    const lower = normalized.toLowerCase();
+    const rootLower = assetsRoot.toLowerCase();
+    if (lower === rootLower) { return 'db://assets'; }
+    if (lower.startsWith(rootLower + '/')) {
+        return 'db://assets/' + normalized.slice(assetsRoot.length + 1);
+    }
+    return '';
+}
+
+/**
+ * 把 db:// 路径转换为系统绝对路径（用于给文件夹选择框设置初始目录）。
+ *
+ * @param {string} dbUrl
+ * @returns {Promise<string>} 系统绝对路径；查询失败时返回空串
+ */
+async function dbUrlToFsPath(dbUrl) {
+    const url = String(dbUrl || '').trim();
+    if (!url.startsWith('db://')) { return ''; }
+    try {
+        const p = await Editor.Message.request('asset-db', 'query-path', url);
+        if (p) { return String(p); }
+    } catch (e) { /* ignore */ }
+    return '';
+}
+
 module.exports = Editor.Panel.define({
     template: `
         <div class="container">
@@ -20,6 +94,7 @@ module.exports = Editor.Panel.define({
                     <label>依赖资源文件夹</label>
                     <div class="input-wrap">
                         <ui-input id="depPath" placeholder="例如 db://assets/textures"></ui-input>
+                        <button id="depBrowse" class="browse-btn" type="button" title="打开系统资源管理器选择文件夹">📂</button>
                         <div class="autocomplete" id="depAC"></div>
                     </div>
                 </div>
@@ -93,10 +168,30 @@ module.exports = Editor.Panel.define({
         .input-wrap {
             position: relative;
             flex: 1;
+            display: flex;
+            align-items: center;
         }
         .input-wrap ui-input {
-            width: 100%;
+            flex: 1;
+            min-width: 0;
         }
+        /* 路径栏最右侧的📂按钮：调用系统文件夹选择对话框 */
+        .browse-btn {
+            flex-shrink: 0;
+            margin-left: 4px;
+            width: 26px;
+            height: 20px;
+            padding: 0;
+            line-height: 1;
+            font-size: 12px;
+            color: #ddd;
+            background: #4a4a4a;
+            border: 1px solid #5a5a5a;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .browse-btn:hover { background: #5a5a5a; }
+        .browse-btn:active { background: #3a6ea5; }
         .btn-primary {
             width: 100%;
             margin-top: 6px;
@@ -258,6 +353,7 @@ module.exports = Editor.Panel.define({
     $: {
         prefabPath: '#prefabPath',
         depPath: '#depPath',
+        depBrowse: '#depBrowse',
         prefabAC: '#prefabAC',
         depAC: '#depAC',
         btnScan: '#btnScan',
@@ -270,11 +366,33 @@ module.exports = Editor.Panel.define({
         btnDelete: '#btnDelete'
     },
 
+    methods: {
+        /**
+         * 从资源管理器右键进入时，把选中的资源路径填入「Prefab 路径」。
+         * 面板已经打开着的情况下由 main 进程推送过来。
+         *
+         * @param {string} dbUrl
+         */
+        applyPrefabPath(dbUrl) {
+            if (!dbUrl) { return; }
+            writeInputValue(this.$.prefabPath, String(dbUrl));
+        },
+    },
+
     ready() {
         const $ = this.$;
 
-        $.prefabPath.value = 'db://assets/prefabs';
-        $.depPath.value = 'db://assets/textures';
+        writeInputValue($.prefabPath, 'db://assets/prefabs');
+        writeInputValue($.depPath, 'db://assets/textures');
+
+        // 面板刚被右键菜单打开：主动取回右键选中的 Prefab 路径
+        //（apply-prefab-path 推送可能早于面板创建完成，所以这里再拉一次）。
+        // 不 await，避免推迟下面事件监听的注册。
+        Editor.Message.request('resource-cleaner', 'get-pending-prefab')
+            .then((pending) => {
+                if (pending) { writeInputValue($.prefabPath, String(pending)); }
+            })
+            .catch(() => { /* 保持默认值 */ });
 
         /** @type {Array<object>} */
         let unusedAssets = [];
@@ -347,16 +465,8 @@ module.exports = Editor.Panel.define({
                 });
             }
 
-            // 写入 ui-input 值：同时更新宿主属性与 shadow DOM 内部原生输入框。
-            // 关键点——直接改内部 input 的 value，这样即便 ui-input 在失焦时
-            // “回读内部值再提交”，读到的也是新值，不会被回退成旧文本。
             function setInputValue(val) {
-                input.value = val;
-                let inner = null;
-                try { inner = input.shadowRoot ? input.shadowRoot.querySelector('input,textarea') : null; } catch (e) { inner = null; }
-                if (!inner) { try { inner = input.$input; } catch (e) { inner = null; } }
-                if (!inner) { try { inner = input.querySelector('input,textarea'); } catch (e) { inner = null; } }
-                if (inner) { inner.value = val; }
+                writeInputValue(input, val);
             }
 
             // 取事件真正触发的原生 input（兼容 shadow DOM），读实时输入值
@@ -459,6 +569,38 @@ module.exports = Editor.Panel.define({
 
         attachAutocomplete($.prefabPath, $.prefabAC, loadPrefabOptions);
         attachAutocomplete($.depPath, $.depAC, loadFolderOptions);
+
+        // ---------------- 📂 系统文件夹选择 ----------------
+        // 用编辑器的系统对话框选目录，再换算回 db:// 路径填入输入框。
+        $.depBrowse.addEventListener('click', async () => {
+            $.depAC.style.display = 'none';
+
+            const current = String($.depPath.value || '').trim();
+            const startPath = (await dbUrlToFsPath(current)) || (await dbUrlToFsPath('db://assets'));
+
+            let result = null;
+            try {
+                result = await Editor.Dialog.select({
+                    title: '选择要清理的资源文件夹',
+                    type: 'directory',
+                    multi: false,
+                    path: startPath || undefined,
+                });
+            } catch (e) {
+                alert('打开文件夹选择框失败：' + (e && e.message ? e.message : e));
+                return;
+            }
+
+            const picked = result && !result.canceled && Array.isArray(result.filePaths) ? result.filePaths[0] : '';
+            if (!picked) { return; }
+
+            const dbUrl = await fsPathToDbUrl(picked);
+            if (!dbUrl) {
+                alert('所选文件夹不在项目的 assets 目录下：\n' + picked);
+                return;
+            }
+            writeInputValue($.depPath, dbUrl);
+        });
 
         // 点击下拉框以外区域时关闭
         document.addEventListener('click', (e) => {

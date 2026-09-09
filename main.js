@@ -40,12 +40,42 @@ async function queryAssetsWhenReady(pattern, retries = 5) {
     return [];
 }
 
+/**
+ * 最近一次从资源管理器右键进入时选中的 Prefab（或文件夹）路径。
+ * 面板 ready 时会主动来取，避免面板尚未创建完成就收不到推送消息。
+ * @type {string}
+ */
+let pendingPrefabPath = '';
+
 exports.methods = {
     /**
-     * 打开清理面板（面板注册名为 default，用包名即可打开）。
+     * 资源管理器右键入口：以右键选中的资源作为「Prefab 路径」打开清理面板。
+     *
+     * @param {string} assetUuid 右键选中的资源 uuid
+     * @returns {Promise<string>} 该资源的 db:// 路径
      */
-    openPanel() {
-        Editor.Panel.open('resource-cleaner');
+    async openCleaner(assetUuid) {
+        let assetInfo = null;
+        try {
+            assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
+        } catch (e) {
+            assetInfo = null;
+        }
+
+        pendingPrefabPath = assetInfo && assetInfo.url ? String(assetInfo.url) : '';
+
+        await Editor.Panel.open('resource-cleaner');
+        // 面板可能已经打开着（不会再走 ready），这里再推送一次保证路径同步
+        Editor.Message.send('resource-cleaner', 'apply-prefab-path', pendingPrefabPath);
+        return pendingPrefabPath;
+    },
+
+    /**
+     * 面板 ready 时拉取右键选中的 Prefab 路径。
+     * @returns {string}
+     */
+    getPendingPrefab() {
+        return pendingPrefabPath;
     },
 
     /**

@@ -1,7 +1,7 @@
 {
     "package_version": 2,
     "name": "resource-cleaner",
-    "version": "1.2.3",
+    "version": "1.3.0",
     "description": "清理未被指定 Prefab（文件夹或单个 .prefab 文件）依赖的资源（同步删除 .meta）",
     "editor": ">=3.8.0",
     "main": "main.js",
@@ -19,17 +19,26 @@
         }
     },
     "contributions": {
-        "menu": [
-            {
-                "path": "i18n:menu.extension/Prefab 依赖清理",
-                "label": "打开清理面板",
-                "message": "open-panel"
+        "assets": {
+            "menu": {
+                "methods": "./assets-menu.js",
+                "assetMenu": "onAssetMenu"
             }
-        ],
+        },
         "messages": {
-            "open-panel": {
+            "open-cleaner": {
                 "methods": [
-                    "openPanel"
+                    "openCleaner"
+                ]
+            },
+            "get-pending-prefab": {
+                "methods": [
+                    "getPendingPrefab"
+                ]
+            },
+            "apply-prefab-path": {
+                "methods": [
+                    "default.applyPrefabPath"
                 ]
             },
             "query-unused-assets": {
