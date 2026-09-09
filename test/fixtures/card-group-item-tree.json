@@ -1,0 +1,55 @@
+{
+  "name": "CardGroupItem-scene",
+  "uuid": "128/BAX91PHKIq5KKuY+7H",
+  "children": [
+    {
+      "name": "should_hide_in_hierarchy",
+      "uuid": "fdSApbFDlFwq0+7XbqHxs1",
+      "children": [
+        {
+          "name": "CardGroupItem",
+          "uuid": "8akESj16xDw7TuXlVNkxzM",
+          "children": [
+            {
+              "name": "Pic",
+              "uuid": "deX/m08YNLXILbi8sfsJCW",
+              "children": []
+            },
+            {
+              "name": "Name",
+              "uuid": "aa8DrKr59P9I/xqmVGF7mm",
+              "children": [
+                {
+                  "name": "Text",
+                  "uuid": "7fqy1cPsxBNYs/eAlBRCG8",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "ProgressBar",
+              "uuid": "afnsvQHqFM+K8samOy7V9J",
+              "children": [
+                {
+                  "name": "Bar",
+                  "uuid": "8aQWKfK0hLILygccV3rOOc",
+                  "children": []
+                },
+                {
+                  "name": "Text",
+                  "uuid": "e9eoKTdX1Bgp/fLJvFEgLo",
+                  "children": []
+                },
+                {
+                  "name": "Finished",
+                  "uuid": "47p05V0KZHOY+krHaY9W1p",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

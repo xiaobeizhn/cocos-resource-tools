@@ -1,20 +1,34 @@
 {
     "package_version": 2,
-    "name": "resource-cleaner",
-    "version": "1.3.0",
-    "description": "清理未被指定 Prefab（文件夹或单个 .prefab 文件）依赖的资源（同步删除 .meta）",
-    "editor": ">=3.8.0",
+    "name": "resource-tools",
+    "version": "2.0.0",
+    "description": "Prefab 资源工具集：未使用资源清理 + 资源 Prefab 引用查询",
+    "editor": ">=3.8.8",
     "main": "main.js",
+    "scripts": {
+        "test": "node --test test/*.test.js"
+    },
     "panels": {
         "default": {
             "title": "Prefab 依赖清理",
             "type": "dockable",
-            "main": "panel.js",
+            "main": "panels/cleaner.js",
             "size": {
                 "min-width": 420,
                 "min-height": 360,
                 "width": 620,
                 "height": 580
+            }
+        },
+        "usage": {
+            "title": "资源 Prefab 引用",
+            "type": "dockable",
+            "main": "panels/usage.js",
+            "size": {
+                "min-width": 420,
+                "min-height": 300,
+                "width": 620,
+                "height": 520
             }
         }
     },
@@ -26,31 +40,17 @@
             }
         },
         "messages": {
-            "open-cleaner": {
-                "methods": [
-                    "openCleaner"
-                ]
-            },
-            "get-pending-prefab": {
-                "methods": [
-                    "getPendingPrefab"
-                ]
-            },
-            "apply-prefab-path": {
-                "methods": [
-                    "default.applyPrefabPath"
-                ]
-            },
-            "query-unused-assets": {
-                "methods": [
-                    "queryUnusedAssets"
-                ]
-            },
-            "delete-selected": {
-                "methods": [
-                    "deleteSelected"
-                ]
-            }
+            "open-cleaner": { "methods": ["openCleaner"] },
+            "get-pending-prefab": { "methods": ["getPendingPrefab"] },
+            "apply-prefab-path": { "methods": ["default.applyPrefabPath"] },
+            "query-unused-assets": { "methods": ["queryUnusedAssets"] },
+            "delete-selected": { "methods": ["deleteSelected"] },
+            "find-usages": { "methods": ["findUsages"] },
+            "get-last-result": { "methods": ["getLastResult"] },
+            "open-prefab": { "methods": ["openPrefab"] },
+            "select-node": { "methods": ["selectNode"] },
+            "render-result": { "methods": ["usage.renderResult"] },
+            "select-node-failed": { "methods": ["usage.selectNodeFailed"] }
         }
     }
 }

@@ -260,7 +260,8 @@ module.exports = Editor.Panel.define({
             margin-right: 10px;
             flex-shrink: 0;
         }
-        .preview-btn {
+        .preview-btn,
+        .usage-btn {
             flex-shrink: 0;
             margin-left: 8px;
             padding: 3px 9px;
@@ -276,6 +277,15 @@ module.exports = Editor.Panel.define({
             background: #3a6ea5;
             color: #fff;
             border-color: #3a6ea5;
+        }
+        .usage-btn:hover {
+            background: #4a7a3a;
+            color: #fff;
+            border-color: #4a7a3a;
+        }
+        .usage-btn[disabled] {
+            opacity: 0.5;
+            cursor: default;
         }
         .file-info { flex: 1; min-width: 0; }
         .file-name {
@@ -388,7 +398,7 @@ module.exports = Editor.Panel.define({
         // 面板刚被右键菜单打开：主动取回右键选中的 Prefab 路径
         //（apply-prefab-path 推送可能早于面板创建完成，所以这里再拉一次）。
         // 不 await，避免推迟下面事件监听的注册。
-        Editor.Message.request('resource-cleaner', 'get-pending-prefab')
+        Editor.Message.request('resource-tools', 'get-pending-prefab')
             .then((pending) => {
                 if (pending) { writeInputValue($.prefabPath, String(pending)); }
             })
@@ -688,6 +698,27 @@ module.exports = Editor.Panel.define({
                 });
                 item.appendChild(previewBtn);
 
+                // 引用按钮：删除前先确认这个资源到底有没有被 Prefab 引用
+                const usageBtn = document.createElement('button');
+                usageBtn.className = 'usage-btn';
+                usageBtn.type = 'button';
+                usageBtn.title = '查找引用该资源的 Prefab 节点（需扫描全部 Prefab，大项目会卡顿几秒）';
+                usageBtn.textContent = '🔍 引用';
+                usageBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    if (usageBtn.disabled) { return; }
+                    // 扫描是同步读取全部 prefab，置灰防止连点把主进程压死
+                    usageBtn.disabled = true;
+                    try {
+                        await Editor.Message.request('resource-tools', 'find-usages', asset.uuid);
+                    } catch (err) {
+                        alert('查找引用失败：' + (err && err.message ? err.message : err));
+                    } finally {
+                        usageBtn.disabled = false;
+                    }
+                });
+                item.appendChild(usageBtn);
+
                 // 单击行：切换选中（延迟 150ms 以区分双击）
                 // 双击行：在资源管理器中定位该资源
                 item.addEventListener('click', (e) => {
@@ -750,7 +781,7 @@ module.exports = Editor.Panel.define({
 
             try {
                 const data = await Editor.Message.request(
-                    'resource-cleaner', 'query-unused-assets', prefabPath, depPath
+                    'resource-tools', 'query-unused-assets', prefabPath, depPath
                 );
 
                 unusedAssets = Array.isArray(data.unused) ? data.unused : [];
@@ -804,7 +835,7 @@ module.exports = Editor.Panel.define({
 
             try {
                 const data = await Editor.Message.request(
-                    'resource-cleaner', 'delete-selected', Array.from(selectedUuids)
+                    'resource-tools', 'delete-selected', Array.from(selectedUuids)
                 );
 
                 const failedSet = new Set((data.failedItems || []).map((it) => it.uuid));

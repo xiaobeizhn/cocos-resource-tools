@@ -1,21 +1,20 @@
 'use strict';
 
 const fs = require('fs');
+const { collectReferencedUuids } = require('./lib/dependency-graph');
+const { partitionDepAssets, selectUnused, toBaseUuidSet } = require('./lib/asset-filter');
+const { findAssetUsagesInPrefab } = require('./lib/prefab-index');
+const { findNodeUuidByPath } = require('./lib/node-tree');
 
-/**
- * 将 uuid 规范化为“基础 uuid”（去掉子资源后缀 @xxx）。
- *
- * 依赖关系经常引用的是子资源（如 SpriteFrame / ImageAsset），其 uuid 形如
- * "xxxxxxxx@f9941"；而文件夹里被扫描的资源本身是文件级基础 uuid。
- * 统一去掉 @ 之后的内容，才能按“文件”级别进行匹配，避免误判为未引用。
- *
- * @param {string} uuid
- * @returns {string}
- */
-function baseUuid(uuid) {
-    if (!uuid) { return uuid; }
-    const idx = uuid.indexOf('@');
-    return idx >= 0 ? uuid.slice(0, idx) : uuid;
+const PACKAGE = 'resource-tools';
+const USAGE_PANEL = 'resource-tools.usage';
+
+// ============================================================
+// 通用
+// ============================================================
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -35,10 +34,14 @@ async function queryAssetsWhenReady(pattern, retries = 5) {
             result = null;
         }
         if (result) { return result; }
-        await new Promise((r) => setTimeout(r, 600));
+        await delay(600);
     }
     return [];
 }
+
+// ============================================================
+// 依赖清理（default 面板）
+// ============================================================
 
 /**
  * 最近一次从资源管理器右键进入时选中的 Prefab（或文件夹）路径。
@@ -47,28 +50,244 @@ async function queryAssetsWhenReady(pattern, retries = 5) {
  */
 let pendingPrefabPath = '';
 
-exports.methods = {
-    /**
-     * 资源管理器右键入口：以右键选中的资源作为「Prefab 路径」打开清理面板。
-     *
-     * @param {string} assetUuid 右键选中的资源 uuid
-     * @returns {Promise<string>} 该资源的 db:// 路径
-     */
-    async openCleaner(assetUuid) {
+/**
+ * 资源管理器右键入口：以右键选中的资源作为「Prefab 路径」打开清理面板。
+ *
+ * @param {string} assetUuid 右键选中的资源 uuid
+ * @returns {Promise<string>} 该资源的 db:// 路径
+ */
+async function openCleaner(assetUuid) {
+    let assetInfo = null;
+    try {
+        assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
+    } catch (e) {
+        assetInfo = null;
+    }
+
+    pendingPrefabPath = assetInfo && assetInfo.url ? String(assetInfo.url) : '';
+
+    await Editor.Panel.open(PACKAGE);
+    // 面板可能已经打开着（不会再走 ready），这里再推送一次保证路径同步
+    Editor.Message.send(PACKAGE, 'apply-prefab-path', pendingPrefabPath);
+    return pendingPrefabPath;
+}
+
+/**
+ * 扫描：找出依赖资源文件夹（depDbPath）中、没有被指定 Prefab
+ * （prefabInput，可为「文件夹」或「单个 .prefab 文件」）直接或间接依赖的资源。
+ *
+ * @param {string} prefabInput 例如 db://assets/prefabs 或 db://assets/prefabs/ui.prefab
+ * @param {string} depDbPath   例如 db://assets/textures
+ * @returns {Promise<object>} 扫描结果
+ */
+async function queryUnusedAssets(prefabInput, depDbPath) {
+    prefabInput = String(prefabInput || '').trim().replace(/\/+$/, '');
+    depDbPath = String(depDbPath || '').trim().replace(/\/+$/, '');
+
+    if (!prefabInput || !depDbPath) {
+        throw new Error('请填写 Prefab 文件夹/文件与依赖资源文件夹');
+    }
+
+    // 1. 获取作为依赖根的 Prefab：支持传入「单个 .prefab 文件」或「文件夹」。
+    //    - 以 .prefab 结尾：按精确路径查询单个 Prefab 资源；
+    //    - 否则视为文件夹，递归收集其下所有 .prefab。
+    const isSinglePrefab = /\.prefab$/i.test(prefabInput);
+    let prefabAssets = [];
+
+    if (isSinglePrefab) {
+        const exact = await queryAssetsWhenReady(prefabInput);
+        prefabAssets = exact.filter((a) =>
+            a && !a.isDirectory && String(a.url || '') === prefabInput
+        );
+        if (!prefabAssets.length) {
+            return {
+                prefabCount: 0,
+                total: 0,
+                unused: [],
+                message: '没有找到 Prefab 文件「' + prefabInput + '」，请确认路径是否正确'
+            };
+        }
+    } else {
+        prefabAssets = await queryAssetsWhenReady(prefabInput + '/**/*.prefab');
+        if (!prefabAssets.length) {
+            return {
+                prefabCount: 0,
+                total: 0,
+                unused: [],
+                message: '在「' + prefabInput + '」下没有找到 .prefab 文件'
+            };
+        }
+    }
+
+    // 2. BFS 递归收集所有 Prefab 的直接 + 间接资源依赖（Prefab → 材质 → 贴图 …）
+    //    query-asset-dependencies 第二个参数 'asset' 仅返回“资源依赖”，
+    //    已自动排除脚本（Script）依赖，因此脚本不会进入引用集合。
+    const referenced = await collectReferencedUuids(
+        prefabAssets.map((p) => p.uuid),
+        (uuid) => Editor.Message.request('asset-db', 'query-asset-dependencies', uuid, 'asset')
+    );
+
+    // 3. 获取文件夹 B 中的所有资源（过滤文件夹、.meta、脚本），再与引用集合求差集
+    const depAssets = await queryAssetsWhenReady(depDbPath + '/**/*');
+    const { files: depFiles, scriptsFiltered } = partitionDepAssets(depAssets);
+    const unused = selectUnused(depFiles, referenced);
+
+    return {
+        prefabCount: prefabAssets.length,
+        referencedCount: toBaseUuidSet(referenced).size,
+        total: depFiles.length,
+        scriptsFiltered,
+        unused
+    };
+}
+
+/**
+ * 删除选中的资源，同步删除对应的 .meta 文件。
+ * 通过 asset-db 的 delete-asset 删除（其本身会一并删除 .meta），
+ * 这里再做一次文件兜底，确保 .meta 被移除。
+ *
+ * @param {string[]} selectedUuids
+ * @returns {Promise<object>}
+ */
+async function deleteSelected(selectedUuids) {
+    const uuids = Array.isArray(selectedUuids) ? selectedUuids : [];
+    let deleted = 0;
+    let failed = 0;
+    const failedItems = [];
+
+    for (const uuid of uuids) {
+        // 先取出绝对路径（删除后 query-asset-info 会返回 null）
         let assetInfo = null;
         try {
-            assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
+            assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
         } catch (e) {
             assetInfo = null;
         }
 
-        pendingPrefabPath = assetInfo && assetInfo.url ? String(assetInfo.url) : '';
+        const fileOnDisk = assetInfo && assetInfo.file ? assetInfo.file : null;
+        const url = assetInfo && assetInfo.url ? assetInfo.url : uuid;
 
-        await Editor.Panel.open('resource-cleaner');
-        // 面板可能已经打开着（不会再走 ready），这里再推送一次保证路径同步
-        Editor.Message.send('resource-cleaner', 'apply-prefab-path', pendingPrefabPath);
-        return pendingPrefabPath;
-    },
+        try {
+            await Editor.Message.request('asset-db', 'delete-asset', url);
+
+            // 兜底：若 .meta 仍残留在磁盘上，手动删除
+            if (fileOnDisk) {
+                const metaPath = fileOnDisk + '.meta';
+                try {
+                    if (fs.existsSync(metaPath)) { fs.unlinkSync(metaPath); }
+                } catch (e) {
+                    // asset-db 通常已经删掉了 .meta，残留删除失败可忽略
+                }
+            }
+            deleted++;
+        } catch (err) {
+            failed++;
+            failedItems.push({
+                uuid,
+                name: assetInfo ? assetInfo.name : uuid,
+                error: err && err.message ? err.message : String(err)
+            });
+        }
+    }
+
+    return { total: uuids.length, deleted, failed, failedItems };
+}
+
+// ============================================================
+// 引用查询（usage 面板）
+// ============================================================
+
+let lastUsageResult = null;
+
+const NODE_QUERY_RETRIES = 10;
+const NODE_QUERY_INTERVAL = 200;
+
+async function queryPrefabs() {
+    const assets = await Editor.Message.request('asset-db', 'query-assets', {
+        pattern: 'db://assets/**/*.prefab',
+    });
+    return Array.isArray(assets) ? assets.filter((asset) => asset && !asset.isDirectory) : [];
+}
+
+function scanPrefab(prefabAsset, assetUuid) {
+    try {
+        const content = fs.readFileSync(prefabAsset.file, 'utf8');
+        const usages = findAssetUsagesInPrefab(JSON.parse(content), assetUuid);
+        return usages.length ? { prefabUuid: prefabAsset.uuid, prefabUrl: prefabAsset.url, usages } : null;
+    } catch (error) {
+        return { error: prefabAsset.url + ': ' + (error.message || String(error)) };
+    }
+}
+
+async function queryNodeUuid(nodePath) {
+    try {
+        const tree = await Editor.Message.request('scene', 'query-node-tree');
+        return findNodeUuidByPath(tree, nodePath);
+    } catch (error) {
+        return null;
+    }
+}
+
+// open-asset resolve 之后预制体编辑模式的场景不一定已经加载完，短暂重试几次再判定为找不到。
+async function waitForNodeUuid(nodePath) {
+    for (let attempt = 0; attempt < NODE_QUERY_RETRIES; attempt += 1) {
+        const nodeUuid = await queryNodeUuid(nodePath);
+        if (nodeUuid) {
+            return nodeUuid;
+        }
+        if (attempt < NODE_QUERY_RETRIES - 1) {
+            await delay(NODE_QUERY_INTERVAL);
+        }
+    }
+    return null;
+}
+
+/**
+ * 查找某个资源被哪些 Prefab 的哪些节点属性引用。
+ * 资源右键菜单与清理面板的「🔍 引用」按钮共用此入口。
+ *
+ * @param {string} assetUuid
+ * @returns {Promise<object>} 同时缓存到 lastUsageResult，供面板 ready 时拉取
+ */
+async function findUsages(assetUuid) {
+    const assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
+    if (!assetInfo || assetInfo.isDirectory) {
+        lastUsageResult = { error: '请选择一个有效的资源文件。', matches: [] };
+    } else {
+        const prefabs = await queryPrefabs();
+        const matches = [];
+        const errors = [];
+
+        for (const prefabAsset of prefabs) {
+            const result = scanPrefab(prefabAsset, assetInfo.uuid);
+            if (result && result.usages) {
+                matches.push(result);
+            } else if (result && result.error) {
+                errors.push(result.error);
+            }
+        }
+
+        lastUsageResult = {
+            assetName: assetInfo.displayName || assetInfo.name,
+            assetUrl: assetInfo.url,
+            prefabCount: prefabs.length,
+            errors,
+            matches,
+        };
+    }
+
+    // 面板首次打开会在 ready 里主动拉 get-last-result；
+    // 面板已经开着时不再走 ready，所以这里补推一次。
+    await Editor.Panel.open(USAGE_PANEL);
+    Editor.Message.send(PACKAGE, 'render-result', lastUsageResult);
+    return lastUsageResult;
+}
+
+// ============================================================
+
+exports.methods = {
+    // —— 依赖清理 ——
+    openCleaner,
 
     /**
      * 面板 ready 时拉取右键选中的 Prefab 路径。
@@ -78,186 +297,58 @@ exports.methods = {
         return pendingPrefabPath;
     },
 
-    /**
-     * 扫描：找出依赖资源文件夹（depDbPath）中、没有被指定 Prefab
-     * （prefabInput，可为「文件夹」或「单个 .prefab 文件」）直接或间接依赖的资源。
-     *
-     * @param {string} prefabInput 例如 db://assets/prefabs 或 db://assets/prefabs/ui.prefab
-     * @param {string} depDbPath   例如 db://assets/textures
-     * @returns {Promise<object>} 扫描结果
-     */
-    async queryUnusedAssets(prefabInput, depDbPath) {
-        prefabInput = String(prefabInput || '').trim().replace(/\/+$/, '');
-        depDbPath = String(depDbPath || '').trim().replace(/\/+$/, '');
+    queryUnusedAssets,
+    deleteSelected,
 
-        if (!prefabInput || !depDbPath) {
-            throw new Error('请填写 Prefab 文件夹/文件与依赖资源文件夹');
-        }
+    // —— 引用查询 ——
+    findUsages,
 
-        // 1. 获取作为依赖根的 Prefab：支持传入「单个 .prefab 文件」或「文件夹」。
-        //    - 以 .prefab 结尾：按精确路径查询单个 Prefab 资源；
-        //    - 否则视为文件夹，递归收集其下所有 .prefab。
-        const isSinglePrefab = /\.prefab$/i.test(prefabInput);
-        let prefabAssets = [];
-
-        if (isSinglePrefab) {
-            const exact = await queryAssetsWhenReady(prefabInput);
-            prefabAssets = exact.filter((a) =>
-                a && !a.isDirectory && String(a.url || '') === prefabInput
-            );
-            if (!prefabAssets.length) {
-                return {
-                    prefabCount: 0,
-                    total: 0,
-                    unused: [],
-                    message: '没有找到 Prefab 文件「' + prefabInput + '」，请确认路径是否正确'
-                };
-            }
-        } else {
-            prefabAssets = await queryAssetsWhenReady(prefabInput + '/**/*.prefab');
-            if (!prefabAssets.length) {
-                return {
-                    prefabCount: 0,
-                    total: 0,
-                    unused: [],
-                    message: '在「' + prefabInput + '」下没有找到 .prefab 文件'
-                };
-            }
-        }
-
-        // 2. BFS 递归收集所有 Prefab 的直接 + 间接资源依赖（Prefab → 材质 → 贴图 …）
-        //    query-asset-dependencies 第二个参数 'asset' 仅返回”资源依赖”，
-        //    已自动排除脚本（Script）依赖，因此脚本不会进入引用集合。
-        const referenced = new Set();
-        const queue = prefabAssets.map((p) => p.uuid);
-
-        while (queue.length) {
-            const uuid = queue.shift();
-            if (referenced.has(uuid)) { continue; }
-            referenced.add(uuid);
-
-            let deps = null;
-            try {
-                deps = await Editor.Message.request('asset-db', 'query-asset-dependencies', uuid, 'asset');
-            } catch (e) {
-                deps = null;
-            }
-            if (Array.isArray(deps)) {
-                for (const dep of deps) {
-                    if (!referenced.has(dep)) { queue.push(dep); }
-                }
-            }
-        }
-
-        // 3. 规范化为基础 uuid 集合（文件级），用于和文件夹 B 的资源做匹配
-        const referencedBase = new Set();
-        for (const u of referenced) { referencedBase.add(baseUuid(u)); }
-
-        // 脚本属于逻辑代码，不在资源清理范围内：按扩展名或类型名识别并排除。
-        const SCRIPT_EXT = /\.(ts|js|mjs|cjs|tsx|jsx)$/i;
-        function isScriptAsset(a) {
-            const name = String(a.name || '');
-            const url = String(a.url || '');
-            if (SCRIPT_EXT.test(name) || SCRIPT_EXT.test(url)) { return true; }
-            const type = String(a.type || '');
-            if (/script/i.test(type)) { return true; }
-            return false;
-        }
-
-        // 4. 获取文件夹 B 中的所有资源（过滤文件夹、.meta、脚本）
-        const depAssets = await queryAssetsWhenReady(depDbPath + '/**/*');
-        const depFiles = depAssets.filter((a) =>
-            a && !a.isDirectory && !String(a.name).endsWith('.meta') && !isScriptAsset(a)
-        );
-        // 统计被过滤掉的脚本数量（仅用于结果展示，确认过滤生效）
-        const scriptsFiltered = depAssets.filter(
-            (a) => a && !a.isDirectory && !String(a.name).endsWith('.meta') && isScriptAsset(a)
-        ).length;
-
-        // 5. 未被任何 Prefab 依赖的资源
-        const unused = depFiles
-            .filter((a) => !referencedBase.has(baseUuid(a.uuid)))
-            .map((a) => ({
-                uuid: a.uuid,
-                url: a.url,                 // db:// 路径（带扩展名），用于显示
-                name: a.name,
-                displayName: a.displayName || a.name,
-                type: a.type,
-                file: a.file                // 绝对路径
-            }));
-
-        return {
-            prefabCount: prefabAssets.length,
-            referencedCount: referencedBase.size,
-            total: depFiles.length,
-            scriptsFiltered,
-            unused
-        };
+    getLastResult() {
+        return lastUsageResult;
     },
 
-    /**
-     * 删除选中的资源，同步删除对应的 .meta 文件。
-     * 通过 asset-db 的 delete-asset 删除（其本身会一并删除 .meta），
-     * 这里再做一次文件兜底，确保 .meta 被移除。
-     *
-     * @param {string[]} selectedUuids
-     * @returns {Promise<object>}
-     */
-    async deleteSelected(selectedUuids) {
-        const uuids = Array.isArray(selectedUuids) ? selectedUuids : [];
-        let deleted = 0;
-        let failed = 0;
-        const failedItems = [];
+    async openPrefab(prefabUuid) {
+        const prefabInfo = await Editor.Message.request('asset-db', 'query-asset-info', prefabUuid);
+        if (prefabInfo) {
+            await Editor.Message.request('asset-db', 'open-asset', prefabInfo.uuid);
+        }
+    },
 
-        for (const uuid of uuids) {
-            // 先取出绝对路径（删除后 query-asset-info 会返回 null）
-            let assetInfo = null;
+    async selectNode({ prefabUuid, nodePath } = {}) {
+        let selected = false;
+
+        if (prefabUuid && nodePath) {
             try {
-                assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
-            } catch (e) {
-                assetInfo = null;
-            }
-
-            const fileOnDisk = assetInfo && assetInfo.file ? assetInfo.file : null;
-            const url = assetInfo && assetInfo.url ? assetInfo.url : uuid;
-
-            try {
-                await Editor.Message.request('asset-db', 'delete-asset', url);
-
-                // 兜底：若 .meta 仍残留在磁盘上，手动删除
-                if (fileOnDisk) {
-                    const metaPath = fileOnDisk + '.meta';
-                    try {
-                        if (fs.existsSync(metaPath)) { fs.unlinkSync(metaPath); }
-                    } catch (e) {
-                        // asset-db 通常已经删掉了 .meta，残留删除失败可忽略
-                    }
+                await Editor.Message.request('asset-db', 'open-asset', prefabUuid);
+                const nodeUuid = await waitForNodeUuid(nodePath);
+                if (nodeUuid) {
+                    Editor.Selection.select('node', nodeUuid);
+                    selected = true;
                 }
-                deleted++;
-            } catch (err) {
-                failed++;
-                failedItems.push({
-                    uuid,
-                    name: assetInfo ? assetInfo.name : uuid,
-                    error: err && err.message ? err.message : String(err)
-                });
+            } catch (error) {
+                selected = false;
             }
         }
 
-        return { total: uuids.length, deleted, failed, failedItems };
-    }
+        if (!selected) {
+            Editor.Message.send(PACKAGE, 'select-node-failed', { prefabUuid, nodePath });
+        }
+
+        Editor.Panel.open(USAGE_PANEL);
+        return selected;
+    },
 };
 
 /**
  * 扩展加载时触发。
  */
 exports.load = function () {
-    console.log('[resource-cleaner] loaded');
+    console.log('[resource-tools] loaded');
 };
 
 /**
  * 扩展卸载时触发。
  */
 exports.unload = function () {
-    console.log('[resource-cleaner] unloaded');
+    console.log('[resource-tools] unloaded');
 };
