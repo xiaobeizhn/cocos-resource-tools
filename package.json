@@ -39,7 +39,17 @@
                 "assetMenu": "onAssetMenu"
             }
         },
+        "hierarchy": {
+            "menu": {
+                "methods": "./hierarchy-menu.js",
+                "nodeMenu": "onNodeMenu"
+            }
+        },
+        "scene": {
+            "script": "./scene.js"
+        },
         "messages": {
+            "copy-node-path": { "methods": ["copyNodePath"] },
             "open-cleaner": { "methods": ["openCleaner"] },
             "get-pending-prefab": { "methods": ["getPendingPrefab"] },
             "apply-prefab-path": { "methods": ["default.applyPrefabPath"] },

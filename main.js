@@ -5,6 +5,7 @@ const { collectReferencedUuids } = require('./lib/dependency-graph');
 const { partitionDepAssets, selectUnused, toBaseUuidSet } = require('./lib/asset-filter');
 const { findAssetUsagesInPrefab } = require('./lib/prefab-index');
 const { findNodeUuidByPath } = require('./lib/node-tree');
+const { formatNodePath } = require('./lib/node-path');
 
 const PACKAGE = 'resource-tools';
 const USAGE_PANEL = 'resource-tools.usage';
@@ -284,8 +285,61 @@ async function findUsages(assetUuid) {
 }
 
 // ============================================================
+// 复制节点路径
+// ============================================================
+
+// 预制体编辑模式下编辑器把预制体根包在这个隐藏节点下
+const PREFAB_EDIT_WRAPPER = 'should_hide_in_hierarchy';
+
+/**
+ * 层级管理器右键「复制节点路径」：资源相对路径 + 节点在资源内的路径写入系统剪贴板。
+ *
+ * @param {string} nodeUuid
+ * @returns {Promise<string>} 复制的文本，失败返回空串
+ */
+async function copyNodePath(nodeUuid) {
+    let location = null;
+    try {
+        location = await Editor.Message.request('scene', 'execute-scene-script', {
+            name: PACKAGE,
+            method: 'queryNodeLocation',
+            args: [nodeUuid],
+        });
+    } catch (e) {
+        console.error('[resource-tools] 查询节点失败:', e);
+    }
+    if (!location) {
+        console.warn(`[resource-tools] 找不到节点 ${nodeUuid}`);
+        return '';
+    }
+
+    let assetInfo = null;
+    if (location.assetUuid) {
+        assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', location.assetUuid).catch(() => null);
+    }
+
+    let text;
+    if (assetInfo && assetInfo.url) {
+        text = formatNodePath(assetInfo.url, location.names);
+    } else {
+        // 拿不到资源时至少复制节点路径，去掉预制体编辑模式的包装层
+        const names = location.sceneNames.slice();
+        if (names[0] === PREFAB_EDIT_WRAPPER) { names.shift(); }
+        text = names.join('/');
+        console.warn('[resource-tools] 未能确定节点所在资源，仅复制节点路径');
+    }
+
+    require('electron').clipboard.writeText(text);
+    console.log(`[resource-tools] 已复制节点路径: ${text}`);
+    return text;
+}
+
+// ============================================================
 
 exports.methods = {
+    // —— 复制节点路径 ——
+    copyNodePath,
+
     // —— 依赖清理 ——
     openCleaner,
 
@@ -343,7 +397,7 @@ exports.methods = {
  * 扩展加载时触发。
  */
 exports.load = function () {
-    console.log('[resource-tools] loaded');
+    console.log('[resource-tools] loaded (copy node path)');
 };
 
 /**
